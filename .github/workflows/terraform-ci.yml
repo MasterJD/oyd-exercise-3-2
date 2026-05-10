@@ -1,0 +1,103 @@
+name: Terraform CI
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build lambda zip
+        run: cd app/ && zip function.zip index.js
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-zip
+          path: app/function.zip
+
+  terraform:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download lambda zip
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-zip
+          path: app
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.0
+
+      - name: Terraform fmt
+        working-directory: infra
+        run: terraform fmt --check -recursive
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        working-directory: infra
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: infra
+        run: terraform plan -var-file=envs/dev/dev.tfvars -no-color -out=tfplan
+
+      - name: Save plan output
+        working-directory: infra
+        run: terraform show -no-color tfplan > plan.txt
+
+      - name: Post plan comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync(`${process.env.GITHUB_WORKSPACE}/infra/plan.txt`, 'utf8');
+            const body = [
+              '<details>',
+              '<summary>Terraform Plan</summary>',
+              '',
+              '```',
+              plan,
+              '```',
+              '</details>'
+            ].join('\n');
+
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            });
